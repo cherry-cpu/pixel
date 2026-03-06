@@ -26,7 +26,10 @@ CREATE TABLE IF NOT EXISTS photos (
   height INTEGER,
   enc_path TEXT NOT NULL,
   caption TEXT,
-  tags_json TEXT NOT NULL DEFAULT '[]'
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  auto_caption TEXT,
+  auto_tags_json TEXT NOT NULL DEFAULT '[]',
+  auto_debug_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS persons (
@@ -70,6 +73,29 @@ class DB:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """
+        Lightweight, additive migrations for hackathon builds.
+        SQLite does not support many ALTERs, so keep to ADD COLUMN only.
+        """
+        try:
+            cols = conn.execute("PRAGMA table_info(photos)").fetchall()
+            have = {str(r[1]) for r in cols}  # row[1] = name
+        except Exception:
+            return
+
+        def add_col(name: str, ddl: str) -> None:
+            if name in have:
+                return
+            conn.execute(f"ALTER TABLE photos ADD COLUMN {ddl}")
+            have.add(name)
+
+        # Added in hackathon v2: background-aware auto caption/tags stored separately
+        add_col("auto_caption", "auto_caption TEXT")
+        add_col("auto_tags_json", "auto_tags_json TEXT NOT NULL DEFAULT '[]'")
+        add_col("auto_debug_json", "auto_debug_json TEXT")
 
     def get_meta(self, key: str) -> str | None:
         with self.connect() as conn:
