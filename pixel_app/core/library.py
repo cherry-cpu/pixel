@@ -3,18 +3,17 @@ from __future__ import annotations
 import hashlib
 import io
 import mimetypes
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import struct
 
-import numpy as np
 from PIL import Image, ImageOps
 
 from pixel_app.core.auth import Auth
 from pixel_app.core.db import DB, dumps_json
-from pixel_app.core.faces import FaceEmbedder, l2_normalize
+from pixel_app.core.faces import FaceEmbedder
 
 
 def _utc_now_iso() -> str:
@@ -30,9 +29,9 @@ def _safe_mime(name: str, fallback: str = "application/octet-stream") -> str:
     return mt or fallback
 
 
-def _encode_embedding(emb: np.ndarray) -> bytes:
-    emb = emb.astype("float32")
-    return emb.tobytes()
+def _encode_embedding(emb: list[float]) -> bytes:
+    # Store float32 to keep payload compact and consistent.
+    return struct.pack("<" + "f" * len(emb), *[float(x) for x in emb])
 
 
 @dataclass
@@ -127,19 +126,22 @@ class Library:
             ),
         )
 
-        # Face detection + embedding (on exif-corrected image)
-        detections = self.embedder.detect_and_embed(img)
+        # Face detection + embedding (optional if local face model installed)
+        try:
+            detections = self.embedder.detect_and_embed(img)
+        except Exception:
+            detections = []
+
         if detections:
             face_rows: list[tuple] = []
             for det in detections:
-                emb = l2_normalize(det.embedding)
                 face_rows.append(
                     (
                         str(uuid.uuid4()),
                         photo_id,
                         None,
                         dumps_json({"xyxy": det.bbox_xyxy}),
-                        _encode_embedding(emb),
+                        _encode_embedding(det.embedding),
                         det.confidence,
                         added_at,
                     )

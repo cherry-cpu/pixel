@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
-
-import numpy as np
 
 
 @dataclass(frozen=True)
 class FaceDetection:
     bbox_xyxy: tuple[int, int, int, int]
     confidence: float | None
-    embedding: np.ndarray  # shape (512,), float32
+    embedding: list[float]  # 512-dim, L2-normalized
 
 
 class FaceEmbedder:
@@ -21,8 +20,14 @@ class FaceEmbedder:
     """
 
     def __init__(self, device: str | None = None) -> None:
-        import torch
-        from facenet_pytorch import InceptionResnetV1, MTCNN
+        # Optional dependency: works when requirements-face.txt is installed.
+        try:
+            import torch  # type: ignore
+            from facenet_pytorch import InceptionResnetV1, MTCNN  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "Local face model not available. Install requirements-face.txt (Python 3.11/3.12 recommended)."
+            ) from e
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -46,18 +51,21 @@ class FaceEmbedder:
 
         face_tensors = face_tensors.to(self.device)
         with torch.no_grad():
-            emb = self.model(face_tensors).detach().cpu().numpy().astype("float32")
+            emb = self.model(face_tensors).detach().cpu()
 
         out: list[FaceDetection] = []
         for i, box in enumerate(boxes):
             x1, y1, x2, y2 = [int(round(v)) for v in box.tolist()]
             conf = None if probs is None else float(probs[i])
-            out.append(FaceDetection(bbox_xyxy=(x1, y1, x2, y2), confidence=conf, embedding=emb[i]))
+            vec = emb[i].tolist()
+            out.append(FaceDetection(bbox_xyxy=(x1, y1, x2, y2), confidence=conf, embedding=l2_normalize(vec)))
         return out
 
 
-def l2_normalize(v: np.ndarray) -> np.ndarray:
-    v = v.astype("float32")
-    n = float(np.linalg.norm(v) + 1e-12)
-    return v / n
+def l2_normalize(v: list[float]) -> list[float]:
+    s = 0.0
+    for x in v:
+        s += float(x) * float(x)
+    n = math.sqrt(s) + 1e-12
+    return [float(x) / n for x in v]
 

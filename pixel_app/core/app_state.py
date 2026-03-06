@@ -36,7 +36,15 @@ def get_app() -> PixelApp:
     auth = Auth(db=db)
     auth.ensure_initialized()
 
-    embedder = FaceEmbedder()
+    # Face model is optional; app runs without it (no face clustering).
+    try:
+        embedder = FaceEmbedder()
+    except Exception:
+        class _NoFaceEmbedder:
+            def detect_and_embed(self, _img):
+                return []
+
+        embedder = _NoFaceEmbedder()  # type: ignore[assignment]
     library = Library(
         db=db,
         auth=auth,

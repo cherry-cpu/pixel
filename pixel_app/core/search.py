@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import math
 import re
+import struct
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-
-import numpy as np
 
 from pixel_app.core.db import DB, dumps_json, loads_json
 
@@ -23,15 +23,60 @@ def _iso_date(s: str | None) -> str | None:
     return None
 
 
-def _decode_embedding(b: bytes) -> np.ndarray:
-    return np.frombuffer(b, dtype="float32")
+def _decode_embedding(b: bytes) -> list[float]:
+    if not b:
+        return []
+    n = len(b) // 4
+    return list(struct.unpack("<" + "f" * n, b[: n * 4]))
 
 
-def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
-    a = a.astype("float32")
-    b = b.astype("float32")
-    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
-    return float(np.dot(a, b) / denom)
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    if not a or not b:
+        return -1.0
+    n = min(len(a), len(b))
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for i in range(n):
+        x = float(a[i])
+        y = float(b[i])
+        dot += x * y
+        na += x * x
+        nb += y * y
+    denom = (math.sqrt(na) * math.sqrt(nb)) + 1e-12
+    return dot / denom
+
+
+def _mean(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    dim = len(vectors[0])
+    acc = [0.0] * dim
+    count = 0
+    for v in vectors:
+        if len(v) != dim:
+            continue
+        for i in range(dim):
+            acc[i] += float(v[i])
+        count += 1
+    if count == 0:
+        return []
+    return [x / count for x in acc]
+
+
+def _avg2(a: list[float], b: list[float]) -> list[float]:
+    if not a:
+        return b
+    if not b:
+        return a
+    n = min(len(a), len(b))
+    out = [(float(a[i]) + float(b[i])) / 2.0 for i in range(n)]
+    # keep trailing dims if any (shouldn't happen)
+    if len(a) > n:
+        out += [float(x) for x in a[n:]]
+    elif len(b) > n:
+        out += [float(x) for x in b[n:]]
+    return out
 
 
 @dataclass
@@ -73,14 +118,15 @@ class PeopleService:
 
         # Build centroids for existing persons
         persons = self.db.query("SELECT id, name FROM persons")
-        centroids: dict[str, np.ndarray] = {}
+        centroids: dict[str, list[float]] = {}
         for p in persons:
             emb_rows = self.db.query("SELECT embedding FROM faces WHERE person_id=?", (p["id"],))
             if not emb_rows:
                 continue
-            embs = np.stack([_decode_embedding(r["embedding"]) for r in emb_rows]).astype("float32")
-            c = embs.mean(axis=0)
-            centroids[str(p["id"])] = c
+            embs = [_decode_embedding(r["embedding"]) for r in emb_rows]
+            c = _mean([e for e in embs if e])
+            if c:
+                centroids[str(p["id"])] = c
 
         created = 0
         assigned = 0
@@ -99,6 +145,8 @@ class PeopleService:
         for row in unknown_faces:
             face_id = str(row["id"])
             emb = _decode_embedding(row["embedding"])
+            if not emb:
+                continue
 
             best_pid = None
             best_sim = -1.0
@@ -112,7 +160,7 @@ class PeopleService:
                 self.assign_face_to_person(face_id, best_pid)
                 assigned += 1
                 # Update centroid incrementally (cheap)
-                centroids[best_pid] = (centroids[best_pid] + emb) / 2.0
+                centroids[best_pid] = _avg2(centroids[best_pid], emb)
                 continue
 
             if created >= max_new_people:

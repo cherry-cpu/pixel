@@ -18,6 +18,18 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+### (Recommended) Enable local face recognition
+
+Local face recognition requires ML packages that currently install cleanly on **Python 3.11/3.12**.
+
+If you can use Python 3.11/3.12:
+
+```bash
+pip install -r requirements-face.txt
+```
+
+If you’re on Python 3.14 and `pip` fails building NumPy/Torch, the app will still run, but face detection/people clustering will be disabled.
+
 2) Run:
 
 ```bash
