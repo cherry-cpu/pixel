@@ -28,8 +28,17 @@ def _photo_card(app, photo_row: dict) -> None:
     with col2:
         st.markdown(f"**{photo_row['original_name']}**")
         st.caption(photo_row["added_at"])
-        tags = app.search.get_photo_tags(photo_row)
-        st.write({"tags": tags, "caption": photo_row.get("caption") or ""})
+        user_tags = app.search.get_photo_tags(photo_row)
+        auto_tags = app.search.get_photo_auto_tags(photo_row)
+        auto_caption = app.search.get_photo_auto_caption(photo_row)
+        st.write(
+            {
+                "auto_caption": auto_caption,
+                "auto_tags": [t for t in auto_tags if ":" not in t],
+                "caption": photo_row.get("caption") or "",
+                "tags": user_tags,
+            }
+        )
 
         new_caption = st.text_input(
             "Caption",
@@ -42,11 +51,11 @@ def _photo_card(app, photo_row: dict) -> None:
 
         tags_str = st.text_input(
             "Tags (comma-separated)",
-            value=", ".join(tags),
+            value=", ".join(user_tags),
             key=f"tags_{photo_row['id']}",
         )
         new_tags = [t.strip() for t in tags_str.split(",") if t.strip()]
-        if new_tags != tags:
+        if new_tags != user_tags:
             app.search.set_photo_tags(photo_row["id"], new_tags)
             st.rerun()
 
@@ -86,24 +95,75 @@ def page_library(app) -> None:
 
     st.divider()
     st.subheader("Auto-organize (faces)")
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        thr = st.slider("Similarity threshold", 0.60, 0.90, 0.78, 0.01)
-    with c2:
-        if st.button("Cluster unknown faces"):
-            stats = app.people.auto_cluster_unknown_faces(sim_threshold=float(thr))
-            st.success(f"Assigned {stats['assigned_faces']} faces; created {stats['created_people']} people.")
+    if st.button("Cluster unknown faces"):
+        stats = app.people.auto_cluster_unknown_faces()
+        st.success(
+            f"Assigned {stats['assigned_faces']} faces; created {stats['created_people']} people."
+        )
 
     st.divider()
-    st.subheader("Recent photos")
-    rows = app.library.list_photos(limit=60, offset=0)
-    if not rows:
-        st.info("No photos yet. Upload a few above.")
-        return
+    st.subheader("Explore")
+    tab_grid, tab_timeline, tab_quality = st.tabs(["Recent grid", "Timeline & events", "Quality & duplicates"])
 
-    for r in rows:
-        with st.container(border=True):
-            _photo_card(app, r)
+    with tab_grid:
+        rows = app.library.list_photos(limit=60, offset=0)
+        if not rows:
+            st.info("No photos yet. Upload a few above.")
+        else:
+            for r in rows:
+                with st.container(border=True):
+                    _photo_card(app, r)
+
+    with tab_timeline:
+        st.caption("Photos grouped into events based on when they were taken.")
+        events = app.search.build_events(gap_hours=3.0)
+        if not events:
+            st.info("No events yet. Add some photos with EXIF dates.")
+        else:
+            for ev in events:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**Event {ev['id']}** — {ev['start_iso'][:10]} to {ev['end_iso'][:10]} "
+                        f"({ev['count']} photos)"
+                    )
+                    # show a few thumbnails inline
+                    cols = st.columns(min(4, len(ev["photo_ids"])))
+                    for idx, pid in enumerate(ev["photo_ids"][:4]):
+                        photo = app.library.get_photo(pid)
+                        if not photo:
+                            continue
+                        with cols[idx]:
+                            try:
+                                thumb = app.library.read_thumbnail_bytes(photo)
+                                st.image(thumb, use_container_width=True)
+                            except Exception:
+                                st.text(photo["original_name"])
+
+    with tab_quality:
+        st.caption("See top-quality photos and near-duplicate groups.")
+        top = app.search.get_top_quality(limit=20)
+        if top:
+            st.markdown("**Top picks (by sharpness/contrast):**")
+            for r in top:
+                with st.container(border=True):
+                    _photo_card(app, r)
+        else:
+            st.info("No photos scored yet.")
+
+        st.markdown("---")
+        st.markdown("**Near-duplicate groups:**")
+        groups = app.search.find_duplicate_groups(max_hamming=4, min_group_size=2)
+        if not groups:
+            st.info("No near-duplicate groups detected yet.")
+        else:
+            for g in groups:
+                with st.container(border=True):
+                    st.caption(f"Group phash={g['phash']} ({len(g['photo_ids'])} photos)")
+                    for pid in g["photo_ids"]:
+                        photo = app.library.get_photo(pid)
+                        if not photo:
+                            continue
+                        _photo_card(app, photo)
 
 
 def page_people(app) -> None:

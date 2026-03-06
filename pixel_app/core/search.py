@@ -196,11 +196,13 @@ class SearchService:
             "LEFT JOIN persons ON persons.id = faces.person_id "
             "WHERE photos.original_name LIKE ? "
             "   OR COALESCE(photos.caption,'') LIKE ? "
+            "   OR COALESCE(photos.auto_caption,'') LIKE ? "
             "   OR photos.tags_json LIKE ? "
+            "   OR photos.auto_tags_json LIKE ? "
             "   OR COALESCE(persons.name,'') LIKE ? "
             "ORDER BY photos.added_at DESC "
             "LIMIT ?",
-            (like, like, like, like, limit),
+            (like, like, like, like, like, like, limit),
         )
         return [dict(r) for r in rows]
 
@@ -219,15 +221,18 @@ class SearchService:
         params: list[Any] = []
 
         if text:
-            clauses.append("(photos.original_name LIKE ? OR COALESCE(photos.caption,'') LIKE ?)")
+            clauses.append(
+                "(photos.original_name LIKE ? OR COALESCE(photos.caption,'') LIKE ? OR COALESCE(photos.auto_caption,'') LIKE ?)"
+            )
             like = f"%{text}%"
-            params += [like, like]
+            params += [like, like, like]
 
         if tags:
             # naive: tags_json contains substrings
             for t in tags:
-                clauses.append("photos.tags_json LIKE ?")
-                params.append(f"%{t}%")
+                clauses.append("(photos.tags_json LIKE ? OR photos.auto_tags_json LIKE ?)")
+                like = f"%{t}%"
+                params += [like, like]
 
         if people:
             # Match any requested person names via join
@@ -268,4 +273,144 @@ class SearchService:
             return list(loads_json(photo_row.get("tags_json") or "[]"))
         except Exception:
             return []
+
+    def get_photo_auto_tags(self, photo_row: dict) -> list[str]:
+        try:
+            return list(loads_json(photo_row.get("auto_tags_json") or "[]"))
+        except Exception:
+            return []
+
+    def get_photo_auto_caption(self, photo_row: dict) -> str:
+        return str(photo_row.get("auto_caption") or "").strip()
+
+    # --- Event & timeline intelligence + quality/duplicates ---
+
+    def _parse_structured_tags(self, tags: list[str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for t in tags:
+            if ":" in t:
+                k, v = t.split(":", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    def build_events(self, gap_hours: float = 3.0) -> list[dict]:
+        """
+        Group photos into events based on taken_at (or added_at) time gaps.
+        Returns list of {id, start, end, count, photo_ids}.
+        """
+        rows = self.db.query(
+            "SELECT id, added_at, taken_at, tags_json, original_name FROM photos ORDER BY COALESCE(taken_at, added_at) ASC"
+        )
+        if not rows:
+            return []
+
+        events: list[dict] = []
+        current: dict | None = None
+        last_ts: datetime | None = None
+        gap_sec = gap_hours * 3600.0
+
+        def parse_ts(s: str | None) -> datetime | None:
+            if not s:
+                return None
+            try:
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+
+        for r in rows:
+            pid = str(r["id"])
+            ts = parse_ts(r["taken_at"] or r["added_at"])
+            if ts is None:
+                continue
+
+            if current is None or last_ts is None:
+                current = {
+                    "id": f"event-{len(events)+1}",
+                    "start": ts,
+                    "end": ts,
+                    "photo_ids": [pid],
+                }
+                last_ts = ts
+                continue
+
+            delta = (ts - last_ts).total_seconds()
+            if delta > gap_sec:
+                # new event
+                current["count"] = len(current["photo_ids"])
+                events.append(current)
+                current = {
+                    "id": f"event-{len(events)+1}",
+                    "start": ts,
+                    "end": ts,
+                    "photo_ids": [pid],
+                }
+            else:
+                current["end"] = ts
+                current["photo_ids"].append(pid)
+            last_ts = ts
+
+        if current:
+            current["count"] = len(current["photo_ids"])
+            events.append(current)
+
+        # convert datetimes to iso for UI
+        for ev in events:
+            ev["start_iso"] = ev["start"].isoformat()
+            ev["end_iso"] = ev["end"].isoformat()
+        return events
+
+    def get_top_quality(self, limit: int = 20) -> list[dict]:
+        rows = self.db.query("SELECT * FROM photos")
+        scored: list[tuple[float, dict]] = []
+        for r in rows:
+            # Quality score is stored as structured auto tag.
+            tags = self.get_photo_auto_tags(dict(r))
+            meta = self._parse_structured_tags(tags)
+            q = float(meta.get("quality", "0") or "0")
+            scored.append((q, dict(r)))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [row for _q, row in scored[:limit] if _q > 0]
+
+    def _hamming(self, a: str, b: str) -> int:
+        if len(a) != len(b):
+            return 64
+        return sum(1 for x, y in zip(a, b) if x != y)
+
+    def find_duplicate_groups(self, max_hamming: int = 4, min_group_size: int = 2) -> list[dict]:
+        """
+        Find near-duplicate groups based on phash:* tags.
+        Returns groups of {phash, photo_ids}.
+        """
+        rows = self.db.query("SELECT id, tags_json, auto_tags_json FROM photos")
+        items: list[tuple[str, str]] = []  # (photo_id, phash)
+        for r in rows:
+            # pHash is stored as structured auto tag.
+            row = dict(r)
+            tags = self.get_photo_auto_tags(row) or self.get_photo_tags(row)
+            meta = self._parse_structured_tags(tags)
+            ph = meta.get("phash")
+            if ph:
+                items.append((str(r["id"]), ph))
+        if not items:
+            return []
+
+        used: set[str] = set()
+        groups: list[dict] = []
+
+        for i, (pid, ph) in enumerate(items):
+            if pid in used:
+                continue
+            group = [pid]
+            used.add(pid)
+            for j in range(i + 1, len(items)):
+                pid2, ph2 = items[j]
+                if pid2 in used:
+                    continue
+                if self._hamming(ph, ph2) <= max_hamming:
+                    group.append(pid2)
+                    used.add(pid2)
+            if len(group) >= min_group_size:
+                groups.append({"phash": ph, "photo_ids": group})
+
+        return groups
 

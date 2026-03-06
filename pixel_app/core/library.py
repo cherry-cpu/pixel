@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 import struct
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ExifTags
 
 from pixel_app.core.auth import Auth
 from pixel_app.core.db import DB, dumps_json
+from pixel_app.core.background import analyze_background
 from pixel_app.core.faces import FaceEmbedder
 
 
@@ -27,6 +28,98 @@ def _sha256(data: bytes) -> str:
 def _safe_mime(name: str, fallback: str = "application/octet-stream") -> str:
     mt, _ = mimetypes.guess_type(name)
     return mt or fallback
+
+
+def _parse_exif_datetime(dt_str: str | None) -> str | None:
+    if not dt_str:
+        return None
+    dt_str = str(dt_str).strip()
+    # Typical EXIF format: "YYYY:MM:DD HH:MM:SS"
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(dt_str, fmt)
+            return dt.replace(tzinfo=timezone.utc).isoformat()
+        except Exception:
+            continue
+    return None
+
+
+def _dms_to_deg(values, ref) -> float | None:
+    try:
+        d, m, s = values
+        d = float(d[0]) / float(d[1])
+        m = float(m[0]) / float(m[1])
+        s = float(s[0]) / float(s[1])
+        deg = d + m / 60.0 + s / 3600.0
+        if ref in ("S", "W"):
+            deg = -deg
+        return deg
+    except Exception:
+        return None
+
+
+def _extract_exif_info(img: Image.Image) -> tuple[str | None, float | None, float | None]:
+    taken_iso: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    try:
+        exif_raw = img._getexif() or {}
+    except Exception:
+        exif_raw = {}
+
+    tag_map = {ExifTags.TAGS.get(k, k): v for k, v in exif_raw.items()}
+    # Date
+    taken_iso = _parse_exif_datetime(tag_map.get("DateTimeOriginal") or tag_map.get("DateTime"))
+
+    # GPS
+    gps = tag_map.get("GPSInfo")
+    if isinstance(gps, dict):
+        # GPSInfo keys are numeric in EXIF
+        gps_decoded = {ExifTags.GPSTAGS.get(k, k): v for k, v in gps.items()}
+        lat_vals = gps_decoded.get("GPSLatitude")
+        lat_ref = gps_decoded.get("GPSLatitudeRef")
+        lon_vals = gps_decoded.get("GPSLongitude")
+        lon_ref = gps_decoded.get("GPSLongitudeRef")
+        if lat_vals and lat_ref:
+            lat = _dms_to_deg(lat_vals, lat_ref)
+        if lon_vals and lon_ref:
+            lon = _dms_to_deg(lon_vals, lon_ref)
+
+    return taken_iso, lat, lon
+
+
+def _compute_quality_and_phash(img: Image.Image) -> tuple[float, str]:
+    """
+    Lightweight quality + perceptual hash.
+    - quality: based on contrast and edge energy
+    - phash: 64-bit aHash (8x8)
+    """
+    try:
+        import numpy as np  # provided transitively by streamlit
+    except Exception:
+        return 0.5, ""
+
+    # Quality
+    g = img.convert("L").resize((256, 256))
+    arr = np.asarray(g, dtype=np.float32) / 255.0
+    contrast = float(arr.std())
+    # edge approximation via simple finite differences
+    dx = np.abs(arr[:, 1:] - arr[:, :-1])
+    dy = np.abs(arr[1:, :] - arr[:-1, :])
+    edges = float((dx.mean() + dy.mean()) / 2.0)
+    q = 0.6 * contrast + 0.4 * edges
+    q = max(0.0, min(1.0, q * 2.0))  # simple normalization
+
+    # aHash
+    ah = img.convert("L").resize((8, 8), Image.BILINEAR)
+    a_arr = np.asarray(ah, dtype=np.float32)
+    avg = float(a_arr.mean())
+    bits = (a_arr > avg).astype("uint8").flatten()
+    val = 0
+    for b in bits:
+        val = (val << 1) | int(b)
+    phash = f"{val:016x}"
+    return q, phash
 
 
 def _encode_embedding(emb: list[float]) -> bytes:
@@ -105,24 +198,58 @@ class Library:
         img = ImageOps.exif_transpose(img)
         width, height = img.size
 
+        # EXIF: taken_at + GPS
+        taken_at_iso, lat, lon = _extract_exif_info(img)
+
+        # Auto quality + perceptual hash (for curation/duplicates)
+        quality_score, phash = _compute_quality_and_phash(img)
+
+        # Background-aware auto caption + tags (stored separately from user tags)
+        try:
+            bg = analyze_background(img)
+            auto_tags = list(bg.tags or [])
+            auto_caption = (bg.caption or "").strip() or None
+            auto_debug_json = dumps_json(bg.debug or {})
+        except Exception:
+            auto_tags = []
+            auto_caption = None
+            auto_debug_json = dumps_json({})
+
+        # Attach structured auto tags for later analytics/search
+        auto_tags = list(sorted(set(auto_tags)))
+        auto_tags.append(f"quality:{quality_score:.3f}")
+        if phash:
+            auto_tags.append(f"phash:{phash}")
+        if taken_at_iso:
+            # date-only + full timestamp
+            auto_tags.append(f"taken_date:{taken_at_iso[:10]}")
+            auto_tags.append(f"taken_at:{taken_at_iso}")
+        if lat is not None and lon is not None:
+            auto_tags.append(f"loc_lat:{lat:.5f}")
+            auto_tags.append(f"loc_lon:{lon:.5f}")
+
         # Store encrypted original bytes (as uploaded)
         enc_bytes = crypto.encrypt(file_bytes)
         enc_path = self.photos_dir / f"{photo_id}.bin"
         enc_path.write_bytes(enc_bytes)
 
         self.db.execute(
-            "INSERT INTO photos(id, original_name, mime, sha256, added_at, width, height, enc_path, tags_json) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO photos(id, original_name, mime, sha256, added_at, taken_at, width, height, enc_path, tags_json, auto_caption, auto_tags_json, auto_debug_json) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 photo_id,
                 original_name,
                 mime,
                 sha,
                 added_at,
+                taken_at_iso,
                 int(width),
                 int(height),
                 str(enc_path),
-                dumps_json([]),
+                dumps_json([]),  # user tags (editable)
+                auto_caption,
+                dumps_json(sorted(set(auto_tags))),
+                auto_debug_json,
             ),
         )
 
@@ -159,5 +286,10 @@ class Library:
             # Thumbnail is an optimization, not a correctness requirement.
             pass
 
+        if auto_tags:
+            # Show only human-friendly, non-structured tags
+            pretty = [t for t in auto_tags if ":" not in t][:8]
+            if pretty:
+                return True, f"Added to library (auto tags: {', '.join(pretty)})."
         return True, "Added to library."
 
