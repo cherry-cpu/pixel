@@ -10,11 +10,7 @@ from PIL import Image
 from pixel_app.core.llm import parse_query_with_llm
 
 
-def _require_unlocked(app) -> bool:
-    if app.auth.crypto is None:
-        st.warning("Library is locked. Enter your passphrase in the sidebar.")
-        return False
-    return True
+
 
 
 def _photo_card(app, photo_row: dict) -> None:
@@ -64,9 +60,6 @@ def _photo_card(app, photo_row: dict) -> None:
 def page_library(app) -> None:
     st.header("Library")
 
-    if not _require_unlocked(app):
-        return
-
     st.subheader("Add photos")
     uploads = st.file_uploader(
         "Upload images",
@@ -85,16 +78,15 @@ def page_library(app) -> None:
         st.success(f"Done. Added {added}, skipped {skipped}.")
 
     st.divider()
-    st.subheader("Auto-organize (faces)")
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        thr = st.slider("Similarity threshold", 0.60, 0.90, 0.78, 0.01)
-    with c2:
-        if st.button("Cluster unknown faces"):
-            stats = app.people.auto_cluster_unknown_faces(sim_threshold=float(thr))
-            st.success(f"Assigned {stats['assigned_faces']} faces; created {stats['created_people']} people.")
-
-    st.divider()
+    # st.subheader("Auto-organize (faces)")
+    # c1, c2 = st.columns([1, 2])
+    #with c1:
+    #    thr = st.slider("Similarity threshold", 0.60, 0.90, 0.78, 0.01)
+    #with c2:
+    #    if st.button("Cluster unknown faces"):
+    #        stats = app.people.auto_cluster_unknown_faces(sim_threshold=float(thr))
+    #        st.success(f"Assigned {stats['assigned_faces']} faces; created {stats['created_people']} people.")
+    #st.divider()
     st.subheader("Recent photos")
     rows = app.library.list_photos(limit=60, offset=0)
     if not rows:
@@ -108,8 +100,6 @@ def page_library(app) -> None:
 
 def page_people(app) -> None:
     st.header("People")
-    if not _require_unlocked(app):
-        return
 
     st.subheader("Known people")
     people = app.people.list_people()
@@ -132,8 +122,6 @@ def page_people(app) -> None:
 
 def page_search(app) -> None:
     st.header("Search")
-    if not _require_unlocked(app):
-        return
 
     q = st.text_input(
         "Search your library",
@@ -160,8 +148,6 @@ def page_search(app) -> None:
 
 def page_share(app) -> None:
     st.header("Share")
-    if not _require_unlocked(app):
-        return
 
     st.subheader("Create a share package")
     photos = app.library.list_photos(limit=200, offset=0)

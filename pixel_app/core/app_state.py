@@ -35,6 +35,7 @@ def get_app() -> PixelApp:
 
     auth = Auth(db=db)
     auth.ensure_initialized()
+    auth.ensure_unlocked("default_passphrase_for_silent_encryption")
 
     # Face model is optional; app runs without it (no face clustering).
     try:
