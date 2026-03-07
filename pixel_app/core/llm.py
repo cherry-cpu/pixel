@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 from dataclasses import dataclass
+from typing import Any
+
+from PIL import Image, ImageOps
 from typing import Any
 
 
@@ -111,13 +115,13 @@ def parse_query_with_llm(user_query: str) -> ParsedQuery | None:
 
 
 VISION_PROMPT = """You are a helpful assistant that analyzes images.
-Pay special attention to the background and the overall aspects/setting of the image.
-Provide a description (caption) and a list of relevant tags based on what you see.
+You must identify the background and the various aspects and objects in the background of the image.
+Provide a general description in the caption, and explicitly mention all identified background aspects and objects in the tags section.
 
 Return ONLY valid JSON with this schema:
 {
-  "caption": "string describing the image, focusing on background/aspects",
-  "tags": ["list", "of", "relevant", "keywords"]
+  "caption": "string describing the overall image",
+  "tags": ["list", "of", "background", "aspects", "and", "objects"]
 }
 """
 
@@ -134,11 +138,21 @@ def analyze_image(image_bytes: bytes, mime_type: str) -> dict | None:
         from groq import Groq
 
         client = Groq(api_key=groq_key)
-        base64_image = base64.b64encode(image_bytes).decode('utf-8')
-        image_url = f"data:{mime_type};base64,{base64_image}"
+        # Resize image if it's too large to prevent timeouts
+        img = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((1024, 1024))
+        
+        # Save compressed image
+        out = io.BytesIO()
+        img.convert("RGB").save(out, format="JPEG", quality=80)
+        compressed_bytes = out.getvalue()
+        
+        base64_image = base64.b64encode(compressed_bytes).decode('utf-8')
+        image_url = f"data:image/jpeg;base64,{base64_image}"
 
         resp = client.chat.completions.create(
-            model=os.getenv("GROQ_VISION_MODEL", "llama-3.2-11b-vision-preview"),
+            model=os.getenv("GROQ_VISION_MODEL", "llama-3.2-90b-vision-preview"),
             messages=[
                 {
                     "role": "user",
@@ -157,12 +171,29 @@ def analyze_image(image_bytes: bytes, mime_type: str) -> dict | None:
             max_tokens=300,
         )
         content = resp.choices[0].message.content
-        obj = json.loads(content)
+        
+        # Clean markdown codeblocks (e.g. ```json \n {...} \n ```) that some models output
+        cleaned_content = content.strip()
+        if cleaned_content.startswith("```"):
+            # Find the first newline to skip the language identifier (e.g. "```json\n")
+            first_newline_idx = cleaned_content.find("\n")
+            if first_newline_idx != -1:
+                cleaned_content = cleaned_content[first_newline_idx+1:]
+            
+            # Remove the trailing "```"
+            if cleaned_content.endswith("```"):
+                cleaned_content = cleaned_content[:-3]
+                
+        cleaned_content = cleaned_content.strip()
+
+        obj = json.loads(cleaned_content)
         return {
             "caption": str(obj.get("caption", "")),
             "tags": [str(t) for t in obj.get("tags", [])]
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"Error calling vision model: {e}")
         return None
 

@@ -25,7 +25,16 @@ def _photo_card(app, photo_row: dict) -> None:
         st.markdown(f"**{photo_row['original_name']}**")
         st.caption(photo_row["added_at"])
         tags = app.search.get_photo_tags(photo_row)
-        st.write({"tags": tags, "caption": photo_row.get("caption") or ""})
+        # Display Caption
+        if photo_row.get("caption"):
+            st.markdown(f"*{photo_row['caption']}*")
+            
+        # Display Tags as Visual Pill Badges (Matching Reference Video)
+        if tags:
+            tag_html = ""
+            for tag in tags:
+                tag_html += f'<span style="display:inline-block; background-color:#1E293B; color:#E2E8F0; border-radius:12px; padding:2px 10px; margin:2px 4px 2px 0; font-size:12px; font-weight:600;">#{tag}</span>'
+            st.markdown(tag_html, unsafe_allow_html=True)
 
         new_caption = st.text_input(
             "Caption",
@@ -55,6 +64,52 @@ def _photo_card(app, photo_row: dict) -> None:
                     for f in faces
                 ],
             )
+
+
+def page_dashboard(app) -> None:
+    st.header("Dashboard")
+    st.caption("Overview of your AI-Organized Library")
+    
+    # Calculate Metrics
+    photos = app.library.list_photos(limit=10000, offset=0)
+    total_photos = len(photos)
+    
+    people = app.people.list_people()
+    total_people = len(people)
+    
+    # Extract unique background tags
+    all_tags = set()
+    for p in photos:
+        for t in app.search.get_photo_tags(p):
+            all_tags.add(t)
+            
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Photos", total_photos)
+    col2.metric("People Identified", total_people)
+    col3.metric("AI Background Tags", len(all_tags))
+    
+    st.divider()
+    st.subheader("Recently Added")
+    
+    rows = app.library.list_photos(limit=3, offset=0)
+    if rows:
+        cols = st.columns(3)
+        for i, r in enumerate(rows):
+            with cols[i % 3]:
+                try:
+                    thumb = app.library.read_thumbnail_bytes(r)
+                    st.image(thumb, use_container_width=True)
+                    st.caption(f"{r['original_name']}")
+                    tags = app.search.get_photo_tags(r)
+                    if tags:
+                        tag_html = ""
+                        for tag in tags[:3]: # limit to 3 tags on dashboard so it doesnt overflow
+                            tag_html += f'<span style="display:inline-block; background-color:#1E293B; color:#E2E8F0; border-radius:12px; padding:2px 8px; margin:2px 2px 2px 0; font-size:10px; font-weight:600;">#{tag}</span>'
+                        st.markdown(tag_html, unsafe_allow_html=True)
+                except:
+                    pass
+    else:
+        st.info("No photos uploaded yet.")
 
 
 def page_library(app) -> None:
@@ -144,6 +199,66 @@ def page_search(app) -> None:
     for r in rows:
         with st.container(border=True):
             _photo_card(app, r)
+
+
+def page_chatbot(app) -> None:
+    st.header("Drishyamitra Assistant")
+    st.caption("Ask me anything about your photos!")
+
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if "images" in msg:
+                cols = st.columns(min(3, len(msg["images"])))
+                for i, r in enumerate(msg["images"]):
+                    with cols[i % 3]:
+                        try:
+                            thumb = app.library.read_thumbnail_bytes(r)
+                            st.image(thumb, use_container_width=True)
+                        except:
+                            pass
+
+    user_input = st.chat_input("Show me photos of Rohan at the beach...")
+
+    if user_input:
+        st.session_state["chat_history"].append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                parsed = parse_query_with_llm(user_input)
+                if parsed:
+                    # Execute search
+                    rows = app.search.structured_search(parsed)
+                    
+                    if rows:
+                        reply = f"I found {len(rows)} photos matching your request!"
+                        st.markdown(reply)
+                        cols = st.columns(min(3, len(rows)))
+                        for i, r in enumerate(rows):
+                            with cols[i % 3]:
+                                try:
+                                    thumb = app.library.read_thumbnail_bytes(r)
+                                    st.image(thumb, use_container_width=True)
+                                except:
+                                    pass
+                        st.session_state["chat_history"].append({
+                            "role": "assistant",
+                            "content": reply,
+                            "images": rows[:3] # Show up to 3 thumbnails in history
+                        })
+                    else:
+                        reply = "I couldn't find any photos perfectly matching that description."
+                        st.markdown(reply)
+                        st.session_state["chat_history"].append({"role": "assistant", "content": reply})
+                else:
+                    reply = "I'm having trouble understanding exactly what photos you are looking for."
+                    st.markdown(reply)
+                    st.session_state["chat_history"].append({"role": "assistant", "content": reply})
 
 
 def page_share(app) -> None:

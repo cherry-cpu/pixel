@@ -4,6 +4,7 @@ import hashlib
 import io
 import mimetypes
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,16 +108,44 @@ class Library:
         enc_path = self.photos_dir / f"{photo_id}.bin"
         enc_path.write_bytes(file_bytes)
 
-        # Call Vision LLM for background analysis and tagging
+        # Run LLM Vision Analysis and Face Detection concurrently to speed up ingestion
         caption = None
         tags = []
-        try:
-            analysis = analyze_image(file_bytes, mime)
-            if analysis:
-                caption = analysis.get("caption")
-                tags = analysis.get("tags", [])
-        except Exception as e:
-            print(f"Skipping LLM analysis: {e}")
+        detections = []
+        
+        def run_llm():
+            try:
+                analysis = analyze_image(file_bytes, mime)
+                if analysis:
+                    return analysis.get("caption"), analysis.get("tags", [])
+                return None, []
+            except Exception as e:
+                print(f"Skipping LLM analysis: {e}")
+                return None, []
+
+        def run_faces(image_obj):
+            try:
+                # Resize image to max 1024x1024 for MTCNN if it's too large to speed it up
+                detect_img = image_obj
+                if detect_img.width > 1024 or detect_img.height > 1024:
+                    detect_img = image_obj.copy()
+                    detect_img.thumbnail((1024, 1024))
+                return self.embedder.detect_and_embed(detect_img)
+            except Exception as e:
+                print(f"Skipping face detection: {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_llm = executor.submit(run_llm)
+            future_faces = executor.submit(run_faces, img)
+
+            caption_res, tags_res = future_llm.result()
+            if caption_res:
+                caption = caption_res
+            if tags_res:
+                tags = tags_res
+                
+            detections = future_faces.result()
 
         self.db.execute(
             "INSERT INTO photos(id, original_name, mime, sha256, added_at, width, height, enc_path, caption, tags_json) "
@@ -134,12 +163,6 @@ class Library:
                 dumps_json(tags),
             ),
         )
-
-        # Face detection + embedding (optional if local face model installed)
-        try:
-            detections = self.embedder.detect_and_embed(img)
-        except Exception:
-            detections = []
 
         if detections:
             face_rows: list[tuple] = []

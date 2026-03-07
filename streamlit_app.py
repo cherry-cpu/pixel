@@ -6,10 +6,13 @@ load_dotenv()
 
 from pixel_app.ui.pages import (
     page_library,
+    page_library,
     page_people,
     page_search,
     page_share,
     page_settings,
+    page_dashboard,
+    page_chatbot,
 )
 from pixel_app.core.app_state import get_app
 
@@ -78,17 +81,8 @@ def main() -> None:
         st.divider()
         page = st.radio(
             "Navigate",
-            ["Library", "People", "Search", "Share", "Settings"],
+            ["Dashboard", "Library", "People", "Search", "Chatbot", "Share", "Settings"],
             index=0,
-        )
-
-        st.divider()
-        st.caption("LLM providers")
-        st.write(
-            {
-                "groq": "configured" if os.getenv("GROQ_API_KEY") else "not set",
-                "huggingface": "configured" if os.getenv("HF_TOKEN") else "not set",
-            }
         )
         if st.button("Logout"):
             st.session_state["logged_in"] = False
@@ -96,12 +90,16 @@ def main() -> None:
                 del st.session_state["username"]
             st.rerun()
 
-    if page == "Library":
+    if page == "Dashboard":
+        page_dashboard(app)
+    elif page == "Library":
         page_library(app)
     elif page == "People":
         page_people(app)
     elif page == "Search":
         page_search(app)
+    elif page == "Chatbot":
+        page_chatbot(app)
     elif page == "Share":
         page_share(app)
     else:
