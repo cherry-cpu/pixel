@@ -30,7 +30,7 @@ class ShareService:
     def init_dirs(self) -> None:
         self.shares_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_share_package(self, photo_ids: Iterable[str], note: str | None = None) -> dict:
+    def create_share_package(self, photo_ids: list[str], note: str | None = None) -> dict:
         """
         Creates an encrypted payload on disk and returns:
         - token: share token (also encryption key)
@@ -38,11 +38,11 @@ class ShareService:
         - download_bytes: a small JSON file user can download (token + metadata)
         """
         self.init_dirs()
-        _ = self.auth.require_crypto()  # must be unlocked to read photos
+        # We no longer require crypto to read photos
 
-        fernet_key = Fernet.generate_key()
-        token = fernet_key.decode("ascii")
-        f = Fernet(fernet_key)
+        share_token = str(uuid.uuid4()).replace("-", "")
+        key_b64 = share_token.encode("ascii")[:32].ljust(32, b"x")
+        f = Fernet(key_b64)
 
         # Build a zip in-memory containing raw images + minimal metadata
         buf = io.BytesIO()

@@ -14,6 +14,7 @@ from PIL import Image, ImageOps
 from pixel_app.core.auth import Auth
 from pixel_app.core.db import DB, dumps_json
 from pixel_app.core.faces import FaceEmbedder
+from pixel_app.core.llm import analyze_image
 
 
 def _utc_now_iso() -> str:
@@ -67,10 +68,8 @@ class Library:
         return [dict(r) for r in rows]
 
     def read_photo_bytes(self, photo_row: dict) -> bytes:
-        crypto = self.auth.require_crypto()
         enc_path = Path(photo_row["enc_path"])
-        token = enc_path.read_bytes()
-        return crypto.decrypt(token)
+        return enc_path.read_bytes()
 
     def read_thumbnail_bytes(self, photo_row: dict, max_size: int = 512) -> bytes:
         thumb_path = self.thumbs_dir / f"{photo_row['id']}.jpg"
@@ -89,7 +88,6 @@ class Library:
 
     def ingest(self, original_name: str, file_bytes: bytes) -> tuple[bool, str]:
         self.init_dirs()
-        crypto = self.auth.require_crypto()
 
         sha = _sha256(file_bytes)
         existing = self.db.query("SELECT id FROM photos WHERE sha256 = ?", (sha,))
@@ -105,14 +103,24 @@ class Library:
         img = ImageOps.exif_transpose(img)
         width, height = img.size
 
-        # Store encrypted original bytes (as uploaded)
-        enc_bytes = crypto.encrypt(file_bytes)
+        # Store original bytes (unencrypted)
         enc_path = self.photos_dir / f"{photo_id}.bin"
-        enc_path.write_bytes(enc_bytes)
+        enc_path.write_bytes(file_bytes)
+
+        # Call Vision LLM for background analysis and tagging
+        caption = None
+        tags = []
+        try:
+            analysis = analyze_image(file_bytes, mime)
+            if analysis:
+                caption = analysis.get("caption")
+                tags = analysis.get("tags", [])
+        except Exception as e:
+            print(f"Skipping LLM analysis: {e}")
 
         self.db.execute(
-            "INSERT INTO photos(id, original_name, mime, sha256, added_at, width, height, enc_path, tags_json) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO photos(id, original_name, mime, sha256, added_at, width, height, enc_path, caption, tags_json) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 photo_id,
                 original_name,
@@ -122,7 +130,8 @@ class Library:
                 int(width),
                 int(height),
                 str(enc_path),
-                dumps_json([]),
+                caption,
+                dumps_json(tags),
             ),
         )
 

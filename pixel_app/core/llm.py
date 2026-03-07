@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 from dataclasses import dataclass
@@ -107,4 +108,61 @@ def parse_query_with_llm(user_query: str) -> ParsedQuery | None:
             pass
 
     return None
+
+
+VISION_PROMPT = """You are a helpful assistant that analyzes images.
+Pay special attention to the background and the overall aspects/setting of the image.
+Provide a description (caption) and a list of relevant tags based on what you see.
+
+Return ONLY valid JSON with this schema:
+{
+  "caption": "string describing the image, focusing on background/aspects",
+  "tags": ["list", "of", "relevant", "keywords"]
+}
+"""
+
+def analyze_image(image_bytes: bytes, mime_type: str) -> dict | None:
+    """
+    Analyzes an image using Groq's vision model and returns a dictionary with 'caption' and 'tags'.
+    Falls back to returning None if no provider is configured or an error occurs.
+    """
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        return None
+
+    try:
+        from groq import Groq
+
+        client = Groq(api_key=groq_key)
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        image_url = f"data:{mime_type};base64,{base64_image}"
+
+        resp = client.chat.completions.create(
+            model=os.getenv("GROQ_VISION_MODEL", "llama-3.2-11b-vision-preview"),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": VISION_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                            },
+                        },
+                    ],
+                }
+            ],
+            temperature=0.1,
+            max_tokens=300,
+        )
+        content = resp.choices[0].message.content
+        obj = json.loads(content)
+        return {
+            "caption": str(obj.get("caption", "")),
+            "tags": [str(t) for t in obj.get("tags", [])]
+        }
+    except Exception as e:
+        print(f"Error calling vision model: {e}")
+        return None
 
