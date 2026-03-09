@@ -1,13 +1,14 @@
 from __future__ import annotations
-
+from random import randint
 import io
 import json
+from dataclasses import replace
 
 import streamlit as st
 import zipfile
 from PIL import Image
 
-from pixel_app.core.llm import parse_query_with_llm
+from pixel_app.core.llm import ParsedQuery, parse_query_with_llm
 
 
 def _require_unlocked(app) -> bool:
@@ -43,7 +44,7 @@ def _photo_card(app, photo_row: dict) -> None:
         new_caption = st.text_input(
             "Caption",
             value=photo_row.get("caption") or "",
-            key=f"cap_{photo_row['id']}",
+            key=f"cap_{photo_row['id']}_{randint(0,100)}",
         )
         if new_caption != (photo_row.get("caption") or ""):
             app.search.set_photo_caption(photo_row["id"], new_caption)
@@ -52,7 +53,7 @@ def _photo_card(app, photo_row: dict) -> None:
         tags_str = st.text_input(
             "Tags (comma-separated)",
             value=", ".join(user_tags),
-            key=f"tags_{photo_row['id']}",
+            key=f"tags_{photo_row['id']}_{randint(0,100)}",
         )
         new_tags = [t.strip() for t in tags_str.split(",") if t.strip()]
         if new_tags != user_tags:
@@ -61,13 +62,33 @@ def _photo_card(app, photo_row: dict) -> None:
 
         faces = app.library.get_photo_faces(photo_row["id"])
         if faces:
-            st.write(
-                "Faces:",
-                [
-                    (f.get("person_name") or "(unassigned)", f.get("confidence"))
-                    for f in faces
-                ],
-            )
+            st.write("Faces:")
+            people_list = app.people.list_people()
+            person_options = {p["name"]: p["id"] for p in people_list}
+            opts = ["(unassigned)"] + list(person_options.keys())
+            for f in faces:
+                face_id = f.get("id")
+                person_name = f.get("person_name") or "(unassigned)"
+                col_a, col_b = st.columns([2, 1])
+                with col_a:
+                    conf = f.get("confidence")
+                    st.caption(f"{person_name}" + (f" (confidence: {conf:.2f})" if conf is not None else ""))
+                with col_b:
+                    if face_id:
+                        current_id = f.get("person_id")
+                        current_name = next((n for n, pid in person_options.items() if pid == current_id), None)
+                        idx = 0 if not current_name or current_name not in opts else opts.index(current_name)
+                        chosen = st.selectbox(
+                            "Assign to",
+                            options=opts,
+                            index=min(idx, len(opts) - 1),
+                            key=f"face_assign_{photo_row['id']}_{face_id}",
+                        )
+                        new_id = None if chosen == "(unassigned)" else person_options.get(chosen)
+                        if new_id != current_id:
+                            app.people.assign_face_to_person(face_id, new_id)
+                            st.rerun()
+            st.caption("Assign faces to people above; use 'Cluster unknown faces' in Library to group similar faces.")
 
 
 def page_library(app) -> None:
@@ -135,7 +156,7 @@ def page_library(app) -> None:
                         with cols[idx]:
                             try:
                                 thumb = app.library.read_thumbnail_bytes(photo)
-                                st.image(thumb, use_container_width=True)
+                                st.image(thumb, use_container_width=False)
                             except Exception:
                                 st.text(photo["original_name"])
 
@@ -165,6 +186,7 @@ def page_library(app) -> None:
                             continue
                         _photo_card(app, photo)
 
+'''
 
 def page_people(app) -> None:
     st.header("People")
@@ -190,13 +212,23 @@ def page_people(app) -> None:
                     st.rerun()
 
 
+'''
 def page_search(app) -> None:
     st.header("Search")
     if not _require_unlocked(app):
         return
 
+    people_list = app.people.list_people()
+    person_names = [p["name"] for p in people_list]
+    quick_person = st.selectbox(
+        "Quick filter: photos of person",
+        options=["(any)"] + person_names,
+        index=0,
+        help="Filter by recognized person without typing.",
+    )
+
     q = st.text_input(
-        "Search your library",
+        "Or search by natural language / keywords",
         placeholder="e.g. 'photos with Arjun at the beach' or 'last week sunset'",
     )
     use_llm = st.toggle("Use natural language (LLM)", value=True)
@@ -204,6 +236,21 @@ def page_search(app) -> None:
     parsed = None
     if q and use_llm:
         parsed = parse_query_with_llm(q)
+
+    if quick_person and quick_person != "(any)":
+        # Combine with NL result if both set; otherwise just filter by person
+        if parsed is not None:
+            merged_people = list(set(parsed.people) | {quick_person})
+            parsed = replace(parsed, people=merged_people)
+        else:
+            parsed = ParsedQuery(
+                people=[quick_person],
+                tags=[],
+                text="",
+                date_from=None,
+                date_to=None,
+                limit=60,
+            )
 
     if parsed is not None:
         with st.expander("Interpreted query (LLM)", expanded=False):

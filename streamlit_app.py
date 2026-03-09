@@ -1,9 +1,17 @@
 import os
+from pathlib import Path
+
+# Load .env from project root if python-dotenv is installed
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except ImportError:
+    pass
+
 import streamlit as st
 
 from pixel_app.ui.pages import (
     page_library,
-    page_people,
     page_search,
     page_share,
     page_settings,
@@ -42,18 +50,12 @@ def main() -> None:
         st.divider()
         page = st.radio(
             "Navigate",
-            ["Library", "People", "Search", "Share", "Settings"],
+            ["Library", "Search", "Share", "Settings"],
             index=0,
         )
 
         st.divider()
-        st.caption("LLM providers")
-        st.write(
-            {
-                "groq": "configured" if os.getenv("GROQ_API_KEY") else "not set",
-                "huggingface": "configured" if os.getenv("HF_TOKEN") else "not set",
-            }
-        )
+
 
     if page == "Library":
         page_library(app)

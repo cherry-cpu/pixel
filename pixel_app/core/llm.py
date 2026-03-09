@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,20 +10,21 @@ from typing import Any
 SYSTEM_PROMPT = """You are a helpful assistant that converts a user's natural language photo search query
 into STRICT JSON for a photo library.
 
-Return ONLY valid JSON with this schema:
-{
-  "people": [string],        // person names, empty if none
-  "tags": [string],          // tags/keywords, empty if none
-  "text": string,            // free text to match captions/filenames, "" if none
-  "date_from": string|null,  // ISO date "YYYY-MM-DD" if specified, else null
-  "date_to": string|null,    // ISO date "YYYY-MM-DD" if specified, else null
-  "limit": number            // 1..200
-}
+Return ONLY valid JSON with this exact schema (no markdown, no explanation):
+{"people": [], "tags": [], "text": "", "date_from": null, "date_to": null, "limit": 50}
+
+Schema:
+- people: array of person names (e.g. ["Alice", "Bob"]), empty [] if none
+- tags: array of tags/keywords (e.g. ["beach", "sunset"]), empty [] if none
+- text: string for captions/filenames, "" if none
+- date_from: "YYYY-MM-DD" or null
+- date_to: "YYYY-MM-DD" or null
+- limit: number between 1 and 200
 
 Guidelines:
-- If user mentions "me", do not guess a name; put it in tags as "me".
-- Prefer extracting person names into people.
-- If unsure, put content into tags/text rather than inventing fields.
+- If user says "me", put "me" in tags, not in people.
+- Extract person names into people when clearly a name.
+- Put vague terms (beach, sunset, party) in tags.
 """
 
 
@@ -34,6 +36,32 @@ class ParsedQuery:
     date_from: str | None
     date_to: str | None
     limit: int
+
+
+def _extract_json(content: str) -> dict[str, Any] | None:
+    """Extract JSON from LLM response (may be wrapped in markdown code blocks)."""
+    if not content or not isinstance(content, str):
+        return None
+    content = content.strip()
+    # Try markdown code block first: ```json ... ``` or ``` ... ```
+    code_block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content)
+    if code_block:
+        try:
+            return json.loads(code_block.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    # Try raw JSON or first {...} object
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+    obj_match = re.search(r"\{[\s\S]*\}", content)
+    if obj_match:
+        try:
+            return json.loads(obj_match.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 def _coerce(obj: dict[str, Any]) -> ParsedQuery:
@@ -80,29 +108,32 @@ def parse_query_with_llm(user_query: str) -> ParsedQuery | None:
                 temperature=0.1,
                 max_tokens=300,
             )
-            content = resp.choices[0].message.content
-            obj = json.loads(content)
-            return _coerce(obj)
+            content = (resp.choices[0].message.content or "").strip()
+            obj = _extract_json(content)
+            if obj is not None:
+                return _coerce(obj)
         except Exception:
-            # Fall through to HF or keyword search
             pass
 
     if hf_token:
         try:
             from huggingface_hub import InferenceClient
 
-            model = os.getenv("HF_MODEL", "meta-llama/Meta-Llama-3-8B-Instruct")
+            model = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
             client = InferenceClient(model=model, token=hf_token)
-            text = client.chat_completion(
+            resp = client.chat_completion(
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_query},
                 ],
                 max_tokens=300,
                 temperature=0.1,
-            ).choices[0].message.content
-            obj = json.loads(text)
-            return _coerce(obj)
+            )
+            msg = resp.choices[0].message
+            content = (getattr(msg, "content", None) or "").strip()
+            obj = _extract_json(content)
+            if obj is not None:
+                return _coerce(obj)
         except Exception:
             pass
 
