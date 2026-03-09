@@ -1,0 +1,8 @@
+# Optional: local face recognition (recommended on Python 3.11/3.12)
+#
+# Python 3.14 currently lacks wheels for some scientific/ML packages on Windows,
+# which forces source builds. Use Python 3.11/3.12 for smooth installs.
+numpy>=1.26
+torch>=2.2
+torchvision>=0.17
+facenet-pytorch>=2.6
